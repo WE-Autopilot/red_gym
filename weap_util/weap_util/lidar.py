@@ -12,11 +12,12 @@ def _lidar_to_bitmap(
         output_image_dims: tuple[int]=(256, 256),
         target_beam_count: int=600,
         fov: float=2*np.pi,
-        draw_mode: str="POLYGON"
+        draw_mode: str="FILL"
     ) -> np.ndarray:  
     """
     Creates a bitmap image based on lidar input.
     Assumes rays are equally spaced within the FOV.
+    Internal only DO NOT USE. Use lidar_to_bitmap instead.
 
     Args:
         scan (list[float]): A list of lidar measurements.
@@ -35,7 +36,7 @@ def _lidar_to_bitmap(
         
         output_image_dims (tuple[int]): The dimensions of the output image. Should be square but not enforced.
         
-        beam_dropout (float): How much of the scan to dropout. I.e., 0 means all beams are drawn, 0.3 means 30% of beams are dropped.
+        target_beam_count (int): The target number of beams (rays) cast into the environment.
         
         fov (float): The field of view of the car measured in radians. Note: the output will look pinched if this is setup incorrectly.
 
@@ -57,7 +58,7 @@ def _lidar_to_bitmap(
     elif scaling_factor is None:
         raise ValueError("Must provide either max_scan_radius or scaling_factor")
 
-    BG_COLOR, DRAW_COLOR = (0, 180) if bg_color == 'black' else (255, 20)
+    BG_COLOR, DRAW_COLOR = (0, 255) if bg_color == 'black' else (255, 0)
 
     # Initialize a blank grayscale image for the output
     image = np.ones((output_image_dims[0], output_image_dims[1]), dtype=np.uint8) * BG_COLOR
@@ -72,13 +73,14 @@ def _lidar_to_bitmap(
     # Precompute angles
     angles = starting_angle + dir * fov * np.linspace(0, 1, target_beam_count)
 
-    # Compute (x, y) positions in one step
+    # Compute (x, y) positions
     center = np.array([output_image_dims[0] // 2, output_image_dims[1] // 2])
     points = np.column_stack((
         np.rint(center[0] + scaling_factor * data * np.cos(angles)).astype(int),
         np.rint(center[1] + scaling_factor * data * np.sin(angles)).astype(int)
     ))
 
+    # draw according to the correct mode
     if draw_mode == 'FILL':
         cv2.fillPoly(image, [points], DRAW_COLOR)
     elif draw_mode == 'POLYGON':
@@ -88,7 +90,7 @@ def _lidar_to_bitmap(
             cv2.line(image, tuple(center), tuple(p), color=DRAW_COLOR, thickness=1)
             cv2.rectangle(image, tuple(p - 2), tuple(p + 2), color=DRAW_COLOR, thickness=-1)
 
-    # Draw center point
+    # Draw center point if needed
     if draw_center:
         cv2.rectangle(image, tuple(center - 2), tuple(center + 2), color=BG_COLOR if draw_mode == "FILL" else DRAW_COLOR, thickness=-1)
     
@@ -129,14 +131,15 @@ def lidar_to_bitmap(
         
         output_image_dims (tuple[int]): The dimensions of the output image. Should be square but not enforced.
         
-        beam_dropout (float): How much of the scan to dropout. I.e., 0 means all beams are drawn, 0.3 means 30% of beams are dropped.
-        
+        target_beam_count (int): The target number of beams (rays) cast into the environment.
+
         fov (float): The field of view of the car measured in radians. Note: the output will look pinched if this is setup incorrectly.
 
         draw_mode (str): How should the final image be drawn. Can be \'RAYS\' (view the ray casts - keep beam count low), \'POLYGON\' (draws the outline of the rays), or \'FILL\' (filled in driveable and nondriveable boundary). 
 
+        channels (int): The number of channels in the output. Must be 1 (grayscale), 3 (RGB), or 4 (RGBA). Default is 1.
     Returns:
-        np.ndarray: A single-channel, grayscale image with a birds-eye-view of the lidar scan.
+        np.ndarray: An image with a birds-eye-view of the lidar scan.
     """
     assert channels in [1, 3, 4], "channels must 1, 3, or 4"
 
