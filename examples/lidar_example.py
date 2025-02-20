@@ -41,8 +41,8 @@ def main():
     work = {'mass': 3.463388126201571, 'lf': 0.15597534362552312, 'tlad': 0.82461887897713965, 'vgain': 1.375}#0.90338203837889}
     
     # Create the additional windows
-    blinded_window = pyglet.window.Window(256, 256, "Blinded LIDAR")
-    nonblinded_window = pyglet.window.Window(256, 256, "Non-blinded LIDAR")
+    blinded_window = pyglet.window.Window(256, 256, "Black Raycast")
+    nonblinded_window = pyglet.window.Window(256, 256, "White Fill")
     # set their positions
     blinded_window.set_location(1100, 100)
     nonblinded_window.set_location(1100, 600)
@@ -101,8 +101,8 @@ def main():
         laptime += step_reward
 
         # lidar func
-        blind_scan = lidar_to_bitmap(scan=obs['scans'][0], channels=3, fov=fov)
-        scan = lidar_to_bitmap(scan=obs['scans'][0], channels=3, fov=fov)
+        blind_scan = lidar_to_bitmap(scan=obs['scans'][0], channels=3, fov=fov, target_beam_count=50, draw_mode='RAYS', bg_color='black')
+        scan = lidar_to_bitmap(scan=obs['scans'][0], channels=3, fov=fov, draw_mode='FILL', bg_color='white')
 
         env.render(mode=render_mode)
         render_image_to_window(data=blind_scan, window=blinded_window)
