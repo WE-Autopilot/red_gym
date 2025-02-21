@@ -41,7 +41,6 @@ class Integrator(Enum):
     RK4 = 1
     Euler = 2
 
-
 class RaceCar(object):
     """
     Base level race car class, handles the physics and laser scan of a single vehicle
@@ -66,7 +65,7 @@ class RaceCar(object):
     scan_angles = None
     side_distances = None
 
-    def __init__(self, params, seed, is_ego=False, time_step=0.01, num_beams=1080, fov=2*np.pi, integrator=Integrator.Euler):
+    def __init__(self, params, seed, is_ego=False, time_step=0.01, num_beams=1080, fov=2*np.pi, integrator=Integrator.Euler, speed_controller=pid):
         """
         Init function
 
@@ -89,6 +88,7 @@ class RaceCar(object):
         self.num_beams = num_beams
         self.fov = fov
         self.integrator = integrator
+        self.speed_controller = speed_controller
         if self.integrator is Integrator.RK4:
             warnings.warn(f"Chosen integrator is RK4. This is different from previous versions of the gym.")
 
@@ -277,8 +277,8 @@ class RaceCar(object):
 
 
         # steering angle velocity input to steering velocity acceleration input
-        accl, sv = pid(vel, steer, self.state[3], self.state[2], self.params['sv_max'], self.params['a_max'], self.params['v_max'], self.params['v_min'])
-        
+        accl, sv = self.speed_controller(vel, steer, self.state[3], self.state[2], self.params['sv_max'], self.params['a_max'], self.params['v_max'], self.params['v_min'])
+
         if self.integrator is Integrator.RK4:
             # RK4 integration
             k1 = vehicle_dynamics_st(
