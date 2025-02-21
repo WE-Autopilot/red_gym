@@ -669,9 +669,22 @@ def MPC_converter(x_accel: float, y_accel: float, current_speed: float, current_
 ##################
 
 def main():
-    print("Ben will also do this")
-    
+    # Make a random 256x256 bitmap.
+    rand_bitmap = torch.rand(1, 1, 256, 256) # Batch size of 1, 1 channel, 256x256 size.
+    rand_bitmap = torch.round(rand_bitmap) # Make it binary (0 or 1).
+    print(f"Random Bitmap: \n {rand_bitmap} \n") # Print random bitmap.
 
-if __name__=="__main__":
+    # Create the Actor instance and send it to the device (CPU or GPU).
+    actor = Actor(32)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    actor = actor.to(device)
+    rand_bitmap = rand_bitmap.to(device)
+
+    # Return a sample of an action from the Actor network.
+    data = actor.sample(rand_bitmap)
+    print(f"Action: \n {data[0]} \n")
+    print(f"Log Prob: \n {data[1]} \n")
+
+# Run the main function.
+if __name__ == "__main__":
     main()
-
