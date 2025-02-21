@@ -205,7 +205,7 @@ class Actor(nn.Module):
         self.fc_mean = nn.Linear(512, action_dim) # (batch_size, action_dim)
         self.fc_log_std = nn.Linear(512, action_dim) # (batch_size, action_dim)
     
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass of the actor network.
         
@@ -224,7 +224,7 @@ class Actor(nn.Module):
         return mean, log_std
 
     
-    def sample(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def sample(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Samples an action using the reparameterization trick.
         
@@ -242,7 +242,7 @@ class Actor(nn.Module):
         log_prob = dist.log_prob(action).sum(dim=-1) # Sum over all dimensions of the action.
 
         return action, log_prob
-
+    
 class Critic(nn.Module):
     """
     Purpose: The Critic estimates the Q-value of a given state (the bitmap) and action (the 32D vector). 
