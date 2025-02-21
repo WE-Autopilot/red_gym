@@ -250,12 +250,38 @@ class Critic(nn.Module):
         (Q-Values or Action-Values : These represent the expected rewards for taking an action in a specific state).
     """
     
-    def __init__(self, action_dim: int = 32):
+    def __init__(self, name,beta, checkPoint_dir="sac", action_dim: int = 32):
         """
         Initializes the Critic network.
         
         :param action_dim: Dimensionality of the action vector (e.g. 32).
+        :param name: name for model checkpointing
         """
+        # the guy has:
+        # 1. the learning rate
+        # 2. dimensions of the environment (itd be 256 x 256 but we dont need this since its known)
+        # 3. dimensions of the fully connected layers also not needed we can just do within
+        # 4. name for model checkpointing which im going to add
+        # 5. checkpoint directory which im going to add 
+        super(Critic,self).__init__()
+        self.action_dim = action_dim
+        self.name = name
+        self.beta = beta
+        self.checkPoint_dir = checkPoint_dir
+        self.checkPoint_file = os.path.join(self.checkPoint_dir,name)
+
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=8, stride=4, padding=3) # Output: (batch_size, 32, 64, 64)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1) # Output: (batch_size, 64, 32, 32)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1) # Output: (batch_size, 128, 16, 16)
+        
+        self.flatten = nn.Flatten() # Flatten the output into a 1D vector.
+
+        # Define a fully connected layer to output probability.
+        self.fc1 = nn.Linear(128 * 16 * 16+action_dim, 256) #Evaluates value of state and action pair 
+        self.fc2 = nn.Linear(256,256)
+        self.q = nn.Linear(256,1)
+
+        self.optimizer = optim.Adam(self.parameters(),lr=beta)
     
     def forward(self, x: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """
@@ -265,8 +291,7 @@ class Critic(nn.Module):
         :param action: A (batch, action_dim) tensor of actions.
         :return: A (batch, 1) tensor representing Q-values for state-action pairs.
         """
-
-
+        
 class Sample:
     """
     Wraps a transition for prioritized replay.
