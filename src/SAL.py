@@ -1,17 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim 
+import numpy as np
+import os
 import gym
 import cv2
-import numpy as np
-import cvxpy as cp
-from scipy.interpolate import CubicSpline
-
-import os
 import random
 import bisect
 import pickle
 import math
+import cvxpy as cp
+from scipy.interpolate import CubicSpline
 from collections import deque
 from typing import List, Tuple, Union
 import time
@@ -21,6 +21,7 @@ from pyglet.gl import GL_LINES
 # Global variables for rendering callbacks
 arrow_graphics = []
 current_planned_path = None
+
 
 ##############################
 ##     GYM ENVIRONOMENT     ##
@@ -67,19 +68,15 @@ class SACF110Env(gym.Env):
 
     def reset(self):
         """Reset environment with default pose and clear path history"""
-        default_pose = np.array([[0.0, 0.0, np.pi/2]])  # x, y, theta
+        default_pose = np.array([[0.0, 0.0, 1.57]])  # x, y, theta
         obs, _, _, _ = self.f110_env.reset(default_pose)
         
         # Process initial observation
         lidar_scan = obs['scans'][0]
-        # Use FILL mode with a black background for the lidar bitmap with full FOV and one channel
-        bitmap = lidar_to_bitmap(lidar_scan, fov=4.7, output_image_dims=(256,256),
-                                 bg_color='black', draw_mode='FILL', channels=1)
-        # Flip the bitmap vertically
-        bitmap = np.flipud(bitmap).copy()
+        bitmap = lidar_to_bitmap(lidar_scan, output_image_dims=(256,256),
+                                bg_color='black', draw_mode='FILL')
         # Store the computed lidar bitmap in the observation
         obs['lidar_bitmap'] = bitmap
-
         self.last_obs = obs
         self.prev_position = np.array([obs['poses_x'][0], obs['poses_y'][0]])
 
@@ -119,10 +116,8 @@ class SACF110Env(gym.Env):
         
         # Process new observation
         lidar_scan = obs['scans'][0]
-        # Use full FOV, black background, FILL mode, 1 channel and flip vertically
-        bitmap = lidar_to_bitmap(lidar_scan, fov=3.7, output_image_dims=(256,256),
-                                 bg_color='black', draw_mode='FILL', channels=1)
-        bitmap = np.flipud(bitmap).copy()
+        bitmap = lidar_to_bitmap(lidar_scan, output_image_dims=(256,256),
+                                bg_color='black', draw_mode='FILL')
         # Add the lidar bitmap into the new observation
         obs['lidar_bitmap'] = bitmap
 
@@ -139,6 +134,7 @@ class SACF110Env(gym.Env):
         self._update_path_visualization()
 
         return bitmap, total_reward, done, info
+
 
     def _world_to_pixel(self, x: float, y: float) -> Tuple[int, int]:
        px = int(self.map_origin[0] + x * self.map_scale)
@@ -159,11 +155,7 @@ class SACF110Env(gym.Env):
         self.sub_index = 0
 
     def _calculate_global_path(self, increments: np.ndarray, car_state: dict) -> list:
-        """Convert local vectors to global path coordinates.
-        
-        Note: Returns the full path including the car’s front, ensuring the MPC 
-        controller starts at the car’s actual front position.
-        """
+        """Convert local vectors to global path coordinates"""
         path = []
         x, y = car_state['x'], car_state['y']
         theta = car_state['theta']
@@ -186,8 +178,7 @@ class SACF110Env(gym.Env):
             new_y = path[-1][1] + global_dy
             path.append((new_x, new_y))
 
-        return path  # Return the full path (do not skip the first point)
-
+        return path[1:]  # Skip initial point
 
     def _calculate_mpc_control(self, car_state: dict) -> np.ndarray:
         """Calculate low-level control using MPC"""
@@ -293,7 +284,6 @@ def _lidar_to_bitmap(
         fov: float = 2*np.pi,
         draw_mode: str = "FILL"
     ) -> np.ndarray:  
-    
     """
     Creates a bitmap image from lidar scan data.
     Assumes rays are equally spaced over the field of view.
@@ -402,12 +392,12 @@ class Actor(nn.Module):
     The Actor outputs a 32D continuous action (in [-1,1]) representing 16 local (x,y) increments.
     Processes the 256x256 lidar bitmap through convolutional layers.
     """
-    def __init__(self, action_dim: int = 32):
+    def __init__(self, action_dim: int = 16):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
-        self.fc1 = nn.Linear(64 * 28 * 28, 512)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(32, 32, kernel_size=3, stride=1)
+        self.fc1 = nn.Linear(32 * 28 * 28, 512)
         self.fc_mean = nn.Linear(512, action_dim)
         self.fc_log_std = nn.Linear(512, action_dim)
         
@@ -434,12 +424,12 @@ class Critic(nn.Module):
     """
     The Critic estimates the Q-value for a given state (bitmap) and action (32D vector).
     """
-    def __init__(self, action_dim: int = 32):
+    def __init__(self, action_dim: int = 16):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
-        self.fc1 = nn.Linear(64 * 28 * 28 + action_dim, 512)
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(32, 32, kernel_size=3, stride=1)
+        self.fc1 = nn.Linear(32 * 28 * 28 + action_dim, 512)
         self.fc2 = nn.Linear(512, 1)
     
     def forward(self, x: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
@@ -451,47 +441,9 @@ class Critic(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=8, stride=4, padding=3) # Output: (batch_size, 32, 64, 64)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1) # Output: (batch_size, 64, 32, 32)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1) # Output: (batch_size, 128, 16, 16)
-        
-        self.flatten = nn.Flatten() # Flatten the output into a 1D vector.
-
-        # Define a fully connected layer to output probability.
-        self.fc1 = nn.Linear(128 * 16 * 16+action_dim, 256) #Evaluates value of state and action pair 
-        self.fc2 = nn.Linear(256,256)
-        self.q = nn.Linear(256,1)
-
-        self.optimizer = optim.Adam(self.parameters(),lr=beta)
-    
-    def forward(self, x: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the critic network, estimating Q-value.
-        
-        :param x: A (batch, 1, 256, 256) input tensor (the bitmap observation).
-        :param action: A (batch, action_dim) tensor of actions.
-        :return: A (batch, 1) tensor representing Q-values for state-action pairs.
-        """
-        
-class Sample:
-    """
-    Wraps a transition for prioritized replay.
-    """
-    def __init__(self, state, action, reward, next_state, done):
-        self.state = state
-        self.action = action
-        self.reward = reward
-        self.next_state = next_state
-        self.done = done
-        self.weight = 1.0
-        self.cumulative_weight = 1.0
-
-    def is_interesting(self):
-        return self.done or self.reward != 0
-
-    def __lt__(self, other):
-        return self.cumulative_weight < other.cumulative_weight
-    
+##############################
+##      REPLAY BUFFER       ##
+##############################
 class ReplayBuffer:
     """
     Stores (state, action, reward, next_state, done) tuples for off-policy RL.
@@ -523,7 +475,7 @@ class SACAgent:
         critic1, critic2: The Q-value estimation networks.
         Target networks for critics (for soft updates).
     """
-    def __init__(self, device: torch.device, action_dim: int = 32, gamma: float = 0.99,
+    def __init__(self, device: torch.device, action_dim: int = 16, gamma: float = 0.99,
                  tau: float = 0.005, alpha: float = 0.2, actor_lr: float = 3e-4,
                  critic_lr: float = 3e-4):
         self.device = device
@@ -633,14 +585,14 @@ class SACAgent:
 def compute_vectors_with_angle_clamp(raw_action: np.ndarray, 
                                    max_diff_deg: float = 10.0) -> np.ndarray:
     """Convert raw action to path vectors with angle constraints"""
-    vectors = raw_action.reshape(16, 2)
+    vectors = raw_action.reshape(8, 2)
     vectors /= np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-8
     
     clamped = np.zeros_like(vectors)
     clamped[0] = [1, 0]
     prev_angle = 0.0
     
-    for i in range(1, 16):
+    for i in range(1, 8):
         desired_angle = np.arctan2(vectors[i,1], vectors[i,0])
         clamped_angle = clamp_vector_angle_diff(prev_angle, desired_angle, max_diff_deg)
         clamped[i] = [np.cos(clamped_angle), np.sin(clamped_angle)]
@@ -655,13 +607,6 @@ def clamp_vector_angle_diff(prev_angle: float, desired_angle: float,
     angle_diff = (desired_angle - prev_angle + np.pi) % (2*np.pi) - np.pi
     return prev_angle + np.clip(angle_diff, -max_diff_rad, max_diff_rad)
 
-    return clamped
-
-def rotate_local_to_global(dx: float, dy: float, heading: float) -> Tuple[float, float]:
-    """Rotate the local vector (dx, dy) by 'heading' radians into the global frame."""
-    global_dx = dx * np.cos(heading) - dy * np.sin(heading)
-    global_dy = dx * np.sin(heading) + dy * np.cos(heading)
-    return global_dx, global_dy
 
 ############################
 ##     MPC CONTROLLER     ##
@@ -763,10 +708,10 @@ def MPC_controller(path: np.ndarray, desiredVelocity: float, timeStep: float, to
         # Build the cost function and dynamics constraints over the horizon.
         for k in range(horizonLength):
             ref_state = ref_traj[t + k] # The reference state at the current step in the horizon
-            cost += cp.quad_form(x[:, k] - ref_state, stateCost) + cp.quad_form(u[:, k], inputCost)
-            constraints += [x[:, k+1] == A @ x[:, k] + B @ u[:, k]]
+            cost += cp.quad_form(x[:, k] - ref_state, stateCost) + cp.quad_form(u[:, k], inputCost) # Adds a penalty to any deviation from the reference state and control input
+            constraints += [x[:, k+1] == A @ x[:, k] + B @ u[:, k]] # Constraints on the state dynamics
             constraints += [u[:, k] <= np.array([1.0, 1.0]),
-                            u[:, k] >= np.array([-1.0, -1.0])]
+                            u[:, k] >= np.array([-1.0, -1.0])] # Constraints on the control inputs (between -1 & 1)
         
         # Terminal cost for the final state in the horizon.
         ref_state_terminal = ref_traj[t + horizonLength]
@@ -787,6 +732,7 @@ def MPC_controller(path: np.ndarray, desiredVelocity: float, timeStep: float, to
 
         state_history.append(x_current)
     
+    # u_history and state_history can be combined into state_history. Optional
     u_history = np.array(u_history)
     state_history = np.array(state_history)
 
@@ -810,11 +756,222 @@ def MPC_converter(x_accel: float, y_accel: float, current_speed: float, current_
     target_angle = np.arctan2(y_accel, x_accel)
     angle_diff = (target_angle - current_steer + np.pi) % (2*np.pi) - np.pi
     steering = np.clip(angle_diff, -max_steer, max_steer)
+    
+    # Calculate acceleration in direction of current heading
+    forward_accel = x_accel * np.cos(current_steer) + y_accel * np.sin(current_steer)
+    throttle = np.clip(forward_accel, -1.0, 1.0)
+    
+    return np.array([steering, throttle])
 
-##################
-##     MAIN     ##
-##################
+def detect_collison(fill_bitmap, car_x, car_y, neighborhood_check=1):
+    """
+    Detects if the car is about to collide with an obstacle.
+    
+    :param fill_bitmap: The filled bitmap image of the environment.
+    :param car_x: Current car X position.
+    :param car_y: Current car Y position.
+    :param neighborhood_check: The number of pixels to check around the car.
+    :return: True if a collision is imminent, False otherwise.
+    """
 
+    h, w = fill_bitmap.shape
+    for dy in range(-neighborhood_check, neighborhood_check+1):
+        for dx in range(-neighborhood_check, neighborhood_check+1):
+            # Skip the car's exact center pixel
+            if dx == 0 and dy == 0:
+                continue
+
+            nx = car_x + dx
+            ny = car_y + dy
+            if 0 <= nx < w and 0 <= ny < h:
+                # If a neighbor is white => off-track/collision
+                if fill_bitmap[ny, nx] == 255:
+                    return True
+    return False
+    
+
+def get_wall_normal(fill_bitmap, car_x, car_y, region=10):
+    """
+
+    :param fill_bitmap: The filled bitmap image of the environment.
+    :param car_x: Current car X position.
+    :param car_y: Current car Y position.
+    :param region: The maximum distance to search for a black pixel.
+    :return: A 1D array representing the wall normal.
+    """
+    # 1. Canny Edge Detection
+    edges = cv2.Canny(fill_bitmap, threshold1=50, threshold2=150)
+
+    # 2. Sobel Gradients
+    grad_x = cv2.Sobel(fill_bitmap, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(fill_bitmap, cv2.CV_32F, 0, 1, ksize=3)
+
+    # 3. Gather gradient vectors at edges near (cx, cy)
+    h, w = fill_bitmap.shape
+    x0 = max(0, car_x - region)
+    x1 = min(w, car_x + region + 1)
+    y0 = max(0, car_y - region)
+    y1 = min(h, car_y + region + 1)
+
+    grad_vectors = []
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            if edges[y, x] == 255:  # It's an edge pixel
+                gx = grad_x[y, x]
+                gy = grad_y[y, x]
+                if not (abs(gx) < 1e-5 and abs(gy) < 1e-5):
+                    grad_vectors.append([gx, gy])
+
+    if len(grad_vectors) == 0:
+        return np.array([0.0, 0.0])
+
+    # 4. Average the gradient vectors
+    arr = np.array(grad_vectors, dtype=np.float32)
+    mean_grad = np.mean(arr, axis=0)
+
+    # 5. Normalize
+    norm = np.linalg.norm(mean_grad) + 1e-8
+    mean_grad /= norm
+
+    # By default, the gradient points from darker to brighter.
+    # If your "normal" should point inward or outward, you might flip or rotate:
+    # For example, normal = mean_grad, or normal = -mean_grad, etc.
+    normal = mean_grad
+
+    return normal
+
+
+def compute_collision_angle(wall_normal, car_direction_vec=np.array([0,1])):
+    """
+    Returns the angle (in degrees) between direction_vec and wall_normal.
+
+    :param car_direction_vec: The direction vector of the car.
+    :param wall_normal: The normal vector of the wall.
+    :return: The angle in degrees.
+    """
+    dot = np.dot(car_direction_vec, wall_normal)
+    # Both are unit vectors => no need to divide by norms
+    dot = np.clip(dot, -1.0, 1.0)  # numerical safety
+    angle = np.degrees(np.arccos(dot))
+    return angle
+
+def collision_angle_penalty(fill_bitmap, car_x, car_y):
+    """
+    Check collision. If collision is detected, compute angle-based penalty.
+
+    :param fill_bitmap: The filled bitmap image of the environment.
+    :param car_x: Current X position.
+    :param car_y: Current Y position.
+    :return: The penalty value.
+    """
+    reward_delta = 0.0
+    collided = detect_collison(fill_bitmap, car_x, car_y)
+    if not collided:
+        return 0.0  # No collision => no penalty
+
+    wall_normal = get_wall_normal(fill_bitmap, car_x, car_y)
+    angle_deg = compute_collision_angle(wall_normal)
+    # Map angle to penalty
+    penalty = np.interp(abs(angle_deg), [0, 90], [0.1, 1.0])
+    reward_delta -= penalty
+    return reward_delta
+
+def distance_from_row_center(fill_bitmap, car_x, car_y):
+    """
+    Returns how far car_x is from the 'center' of the drivable area
+    on the row car_y in the fill_bitmap.
+
+    :param fill_bitmap: The filled bitmap image of the environment.
+    :param car_x: Current car X position.
+    :param car_y: Current car Y position.
+    :return: The distance from the center
+    """
+    h, w = fill_bitmap.shape
+
+    # Safety check
+    if not (0 <= car_y < h and 0 <= car_x < w):
+        return None  # Car is out of bounds
+
+    # 1. Find left boundary
+    left_edge = car_x
+    while left_edge >= 0 and fill_bitmap[car_y, left_edge] == 255:
+        left_edge -= 1
+    # Move one pixel into white area
+    left_edge += 1
+
+    # 2. Find right boundary
+    right_edge = car_x
+    while right_edge < w and fill_bitmap[car_y, right_edge] == 255:
+        right_edge += 1
+    # Move one pixel into white area
+    right_edge -= 1
+
+    # If we found valid edges
+    if left_edge < 0 or right_edge >= w or left_edge >= right_edge:
+        # Possibly means car is off track or no white area in that row
+        return None
+
+    # 3. Midpoint
+    midpoint = (left_edge + right_edge) / 2.0
+    # 4. Distance from center
+    dist = abs(car_x - midpoint)
+    # 5. Return distance
+    return dist
+
+def centerline_reward(fill_bitmap, car_x, car_y, max_lane_halfwidth=50):
+    """
+    If the car is near the 'center' of the lane (in that row),
+    give higher reward. If far, give lower reward.
+    """
+    dist = distance_from_row_center(fill_bitmap, car_x, car_y)
+    if dist is None:
+        # Car might be off track => big penalty or zero reward
+        return -1.0
+
+    # Normalize distance by half-lane width
+    norm_dist = dist / max_lane_halfwidth  # e.g., 0 = center, 1 = near boundary
+    # Reward could be: R = 1 - norm_dist (bounded to [0, 1] if dist <= max_lane_halfwidth)
+    reward = max(0.0, 1.0 - norm_dist)
+    return reward
+
+
+def render_arrow(env_renderer, flattened_path: np.ndarray):
+    """
+    Renders arrows along the planned path for visualization.
+    
+    Args:
+        env_renderer: The environment renderer (expects a pyglet batch).
+        flattened_path (np.ndarray): Flattened array of path points.
+    """
+    global arrow_graphics
+    for arrow in arrow_graphics:
+        arrow.delete()
+    arrow_graphics = []
+    
+    points = flattened_path.reshape(-1, 2)
+    scale = 50.0
+    for i in range(len(points) - 1):
+        x0, y0 = points[i]
+        x1, y1 = points[i + 1]
+        arrow = env_renderer.batch.add(
+            2, GL_LINES, None,
+            ('v2f', (x0 * scale, y0 * scale, x1 * scale, y1 * scale)),
+            ('c3B', (0, 255, 0, 0, 255, 0))
+        )
+        arrow_graphics.append(arrow)
+
+def render_callback(env_renderer):
+    """
+    Callback for the simulator renderer to display the planned path.
+    """
+    global current_planned_path
+    if current_planned_path is not None:
+        render_arrow(env_renderer, current_planned_path)
+
+        
+##############################
+##      MAIN TRAINING LOOP  ##
+##############################
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -823,7 +980,7 @@ def main():
     f110_env.add_render_callback(render_callback)
     
     env = SACF110Env(f110_env)
-    agent = SACAgent(device, action_dim=32)
+    agent = SACAgent(device, action_dim=16)
     replay_buffer = ReplayBuffer()
     
     max_episodes = 1000
@@ -844,7 +1001,6 @@ def main():
             obs = next_obs
             ep_reward += reward
             total_steps += 1
-            print(f"Episode {ep} Reward={ep_reward:.2f}")
             
             f110_env.render("human")
             cv2.imshow("LiDAR Bitmap", obs)
@@ -857,7 +1013,7 @@ def main():
             if done:
                 break
         print(f"Episode {ep} Reward={ep_reward:.2f}")
-        
+    
     torch.save(agent.actor.state_dict(), "sac_actor.pth")
     cv2.destroyAllWindows()
     print("Training complete, model saved as sac_actor.pth")
