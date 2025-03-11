@@ -22,7 +22,6 @@ from pyglet.gl import GL_LINES
 arrow_graphics = []
 current_planned_path = None
 
-
 ##############################
 ##     GYM ENVIRONOMENT     ##
 ##############################
@@ -68,15 +67,19 @@ class SACF110Env(gym.Env):
 
     def reset(self):
         """Reset environment with default pose and clear path history"""
-        default_pose = np.array([[0.0, 0.0, 1.57]])  # x, y, theta
+        default_pose = np.array([[0.0, 0.0, np.pi/2]])  # x, y, theta
         obs, _, _, _ = self.f110_env.reset(default_pose)
         
         # Process initial observation
         lidar_scan = obs['scans'][0]
-        bitmap = lidar_to_bitmap(lidar_scan, output_image_dims=(256,256),
-                                bg_color='black', draw_mode='FILL')
+        # Use FILL mode with a black background for the lidar bitmap with full FOV and one channel
+        bitmap = lidar_to_bitmap(lidar_scan, fov=4.7, output_image_dims=(256,256),
+                                 bg_color='black', draw_mode='FILL', channels=1)
+        # Flip the bitmap vertically
+        bitmap = np.flipud(bitmap).copy()
         # Store the computed lidar bitmap in the observation
         obs['lidar_bitmap'] = bitmap
+
         self.last_obs = obs
         self.prev_position = np.array([obs['poses_x'][0], obs['poses_y'][0]])
 
@@ -116,8 +119,10 @@ class SACF110Env(gym.Env):
         
         # Process new observation
         lidar_scan = obs['scans'][0]
-        bitmap = lidar_to_bitmap(lidar_scan, output_image_dims=(256,256),
-                                bg_color='black', draw_mode='FILL')
+        # Use full FOV, black background, FILL mode, 1 channel and flip vertically
+        bitmap = lidar_to_bitmap(lidar_scan, fov=3.7, output_image_dims=(256,256),
+                                 bg_color='black', draw_mode='FILL', channels=1)
+        bitmap = np.flipud(bitmap).copy()
         # Add the lidar bitmap into the new observation
         obs['lidar_bitmap'] = bitmap
 
@@ -134,7 +139,6 @@ class SACF110Env(gym.Env):
         self._update_path_visualization()
 
         return bitmap, total_reward, done, info
-
 
     def _world_to_pixel(self, x: float, y: float) -> Tuple[int, int]:
        px = int(self.map_origin[0] + x * self.map_scale)
@@ -155,7 +159,11 @@ class SACF110Env(gym.Env):
         self.sub_index = 0
 
     def _calculate_global_path(self, increments: np.ndarray, car_state: dict) -> list:
-        """Convert local vectors to global path coordinates"""
+        """Convert local vectors to global path coordinates.
+        
+        Note: Returns the full path including the car’s front, ensuring the MPC 
+        controller starts at the car’s actual front position.
+        """
         path = []
         x, y = car_state['x'], car_state['y']
         theta = car_state['theta']
@@ -178,7 +186,8 @@ class SACF110Env(gym.Env):
             new_y = path[-1][1] + global_dy
             path.append((new_x, new_y))
 
-        return path[1:]  # Skip initial point
+        return path  # Return the full path (do not skip the first point)
+
 
     def _calculate_mpc_control(self, car_state: dict) -> np.ndarray:
         """Calculate low-level control using MPC"""
@@ -284,6 +293,7 @@ def _lidar_to_bitmap(
         fov: float = 2*np.pi,
         draw_mode: str = "FILL"
     ) -> np.ndarray:  
+    
     """
     Creates a bitmap image from lidar scan data.
     Assumes rays are equally spaced over the field of view.
@@ -753,10 +763,10 @@ def MPC_controller(path: np.ndarray, desiredVelocity: float, timeStep: float, to
         # Build the cost function and dynamics constraints over the horizon.
         for k in range(horizonLength):
             ref_state = ref_traj[t + k] # The reference state at the current step in the horizon
-            cost += cp.quad_form(x[:, k] - ref_state, stateCost) + cp.quad_form(u[:, k], inputCost) # Adds a penalty to any deviation from the reference state and control input
-            constraints += [x[:, k+1] == A @ x[:, k] + B @ u[:, k]] # Constraints on the state dynamics
+            cost += cp.quad_form(x[:, k] - ref_state, stateCost) + cp.quad_form(u[:, k], inputCost)
+            constraints += [x[:, k+1] == A @ x[:, k] + B @ u[:, k]]
             constraints += [u[:, k] <= np.array([1.0, 1.0]),
-                            u[:, k] >= np.array([-1.0, -1.0])] # Constraints on the control inputs (between -1 & 1)
+                            u[:, k] >= np.array([-1.0, -1.0])]
         
         # Terminal cost for the final state in the horizon.
         ref_state_terminal = ref_traj[t + horizonLength]
@@ -777,7 +787,6 @@ def MPC_controller(path: np.ndarray, desiredVelocity: float, timeStep: float, to
 
         state_history.append(x_current)
     
-    # u_history and state_history can be combined into state_history. Optional
     u_history = np.array(u_history)
     state_history = np.array(state_history)
 
@@ -801,12 +810,6 @@ def MPC_converter(x_accel: float, y_accel: float, current_speed: float, current_
     target_angle = np.arctan2(y_accel, x_accel)
     angle_diff = (target_angle - current_steer + np.pi) % (2*np.pi) - np.pi
     steering = np.clip(angle_diff, -max_steer, max_steer)
-    
-    # Calculate acceleration in direction of current heading
-    forward_accel = x_accel * np.cos(current_steer) + y_accel * np.sin(current_steer)
-    throttle = np.clip(forward_accel, -1.0, 1.0)
-    
-    return np.array([steering, throttle])
 
 ##################
 ##     MAIN     ##
@@ -841,6 +844,7 @@ def main():
             obs = next_obs
             ep_reward += reward
             total_steps += 1
+            print(f"Episode {ep} Reward={ep_reward:.2f}")
             
             f110_env.render("human")
             cv2.imshow("LiDAR Bitmap", obs)
@@ -853,7 +857,7 @@ def main():
             if done:
                 break
         print(f"Episode {ep} Reward={ep_reward:.2f}")
-    
+        
     torch.save(agent.actor.state_dict(), "sac_actor.pth")
     cv2.destroyAllWindows()
     print("Training complete, model saved as sac_actor.pth")
